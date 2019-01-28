@@ -1,56 +1,225 @@
 // ==UserScript==
 // @name         Tensorboard Spreadsheet Helper
 // @namespace    http://texot.one/
-// @version      0.1
+// @version      0.3
 // @require      https://code.jquery.com/jquery-latest.js
 // @require      https://apis.google.com/js/api.js
 // @author       Texot
 // @match        http://localhost:8889/*
 // @grant        GM_addStyle
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        unsafeWindow
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    const API_KEY = ""; // simply leave this empty
-    const CLIENT_ID = "YOUR_CLIENT_ID.apps.googleusercontent.com"; // fill your client id
     const DISCOVERY_DOCS = ["https://sheets.googleapis.com/$discovery/rest?version=v4"];
     const SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly";
-    const SPREADSHEET_ID = "YOUR_SPREADSHEET_ID"; // fill you spreadsheet id
+
     const REFRESH_RATE = 30;
-    const SHEET = "Log"; // sheet name
-    // CUSTOMIZE HERE IF YOU WANT TO CHANGE SHEET FORM
-    const COL_NAME_L = "A";
-    const COL_NAME = 0;
-    const COL_TIME = 1;
-    const COL_EPOCH = 2;
-    const COL_STORE = 3;
-    const COL_DESC = 4;
+    
+    const COL_INDEX = 0;
+
     const MAX_START_TRY = 3;
     var start_try_times = 0;
 
-    function StartTBSpreadsheetHelper(){
+    var client_id = GM_getValue("CLIENT_ID", null);
+    var spreadsheet_id = GM_getValue("SPREADSHEET_ID", null);
+    var avail_sheets = GM_getValue("SHEETS", []);
+
+    Object.fromEntries = arr => 
+        Object.assign({}, ...Array.from(arr, ([k, v]) => ({[k]: v}) ));
+
+    function getColumnLetter(column) {
+        const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        var n = parseInt(column+1);
+        var s = "", c = null;
+        while (n > 0) {
+            c = ((n - 1) % 26);
+            s = LETTERS[c] + s;
+            n = parseInt((n - c) / 26);
+        }
+        return s;
+    }
+
+    function protoToCssColor(rgb_color) {
+        if (rgb_color == null) return null;
+        var redFrac = rgb_color.red;
+        var greenFrac = rgb_color.green;
+        var blueFrac = rgb_color.blue;
+        var red = Math.floor(redFrac * 255);
+        var green = Math.floor(greenFrac * 255);
+        var blue = Math.floor(blueFrac * 255);
+        return rgbToCssColor(red, green, blue);
+    };
+
+    function rgbToCssColor(red, green, blue) {
+        var rgbNumber = new Number((red << 16) | (green << 8) | blue);
+        var hexString = rgbNumber.toString(16);
+        var missingZeros = 6 - hexString.length;
+        var resultBuilder = ['#'];
+        for (var i = 0; i < missingZeros; i++) {
+            resultBuilder.push('0');
+        }
+        resultBuilder.push(hexString);
+        return resultBuilder.join('');
+    };
+
+    function initClient(updateCallback) {
+        return window.gapi.load('client:auth2', function () {
+            window.gapi.client.init({
+                apiKey: "",
+                clientId: client_id,
+                discoveryDocs: DISCOVERY_DOCS,
+                scope: SCOPES
+            }).then(function () {
+                // Listen for sign-in state changes.
+                window.gapi.auth2.getAuthInstance().isSignedIn.listen(updateCallback);
+
+                // Handle the initial sign-in state.
+                updateCallback(window.gapi.auth2.getAuthInstance().isSignedIn.get());
+            }, function(response) {
+                console.error("Error init gapi: " + response.result.error.message);
+            });
+        });
+    }
+
+    function loadFieldNames(sheet_name) {
+        return window.gapi.client.sheets.spreadsheets.values.get({
+            spreadsheetId: spreadsheet_id,
+            range: `${sheet_name}!1:1`
+        })
+        .then(function(response) {
+            return response.result.values[0];
+        });
+    }
+
+    function loadData(sheet_name) {
+        var now = new Date();
+        console.log("[" + now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds() + "." + now.getMilliseconds() + "] " +
+                    "Loading spreadsheet data");
+        return new Promise(function (resolve, reject) {
+            var dataRows = null;
+            var formatRows = null;
+            window.gapi.client.sheets.spreadsheets.values.get({
+                spreadsheetId: spreadsheet_id,
+                range: sheet_name
+            })
+            .then(function(response) {
+                // loading data
+                var range_data = response.result;
+                var exp_runs = {};
+                for (var i = 1; i < range_data.values.length; i++) {
+                    var row = range_data.values[i];
+                    var exp_index = row[COL_INDEX].trim();
+                    if (exp_index.length > 0) {
+                        exp_runs[exp_index] = {sheet: sheet_name, data: row};
+                    }
+                }
+                dataRows = exp_runs;
+                
+                // go loading format
+                return window.gapi.client.sheets.spreadsheets.get({
+                    spreadsheetId: spreadsheet_id,
+                    ranges: `${sheet_name}`,
+                    includeGridData: true
+                });
+            })
+            .catch(function(response) {
+                if (response != null)
+                    console.error("Error loading data: " + response.result.error.message);
+                dataRows = null;
+                return Promise.reject(null);
+            })
+            .then(function(response) {
+                // loading format
+                var data = response.result.sheets[0].data;
+                if (data.length > 0) {
+                    var formats = {};
+                    var range_data = data[0].rowData;
+                    for (var i = 1; i < range_data.length; i++) {
+                        var index_cell = range_data[i].values[0];
+                        if (typeof index_cell.formattedValue == "undefined") continue;
+                        var index_cell_name = index_cell.formattedValue.trim();
+                        if (typeof dataRows[index_cell_name] == "undefined") continue;
+                        formats[index_cell_name] = [];
+                        for (var j = 0; j < range_data[i].values.length; j++) {
+                            var cell = range_data[i].values[j];
+                            var forcolor = null, backcolor = null;
+                            if (typeof cell.effectiveFormat != "undefined") {
+                                forcolor = protoToCssColor(cell.effectiveFormat.textFormat.foregroundColor);
+                                backcolor = protoToCssColor(cell.effectiveFormat.backgroundColor);
+                            }
+                            if (forcolor == "#000000" && backcolor == "#ffffff") {
+                                forcolor = null;
+                                backcolor = null;
+                            }
+                            formats[index_cell_name].push([forcolor, backcolor]);
+                        }
+                    }
+                    formatRows = formats;
+                } else {
+                    console.error("No data found.");
+                    formatRows = null;
+                }
+            })
+            .catch(function(response) {
+                if (response != null)
+                    console.error("Error loading format: " + response.result.error.message);
+                formatRows = null;
+            })
+            .then(function () {
+                resolve({d: dataRows, f: formatRows});
+            });
+        });
+    }
+
+    function loadAllFieldNames() {
+        var promises = [];
+        var fieldNames = {};
+        for (var isheet = 0; isheet < avail_sheets.length; isheet++) {
+            var sheet_name = avail_sheets[isheet];
+            promises.push(loadFieldNames(sheet_name));
+        }
+        return Promise.all(promises).then((values) => {return Object.fromEntries(values.map((value, index) => [avail_sheets[index], value]));});
+    }
+
+    function loadAllData() {
+        var promises = [];
+        var dataRows = {}, formatRows = {};
+        for (var isheet = 0; isheet < avail_sheets.length; isheet++) {
+            var sheet_name = avail_sheets[isheet];
+            promises.push(loadData(sheet_name).then((val) => {
+                if (val.d != null) Object.assign(dataRows, val.d);
+                if (val.f != null) Object.assign(formatRows, val.f);
+            }));
+        }
+        return Promise.all(promises).then(() => {return {dataRows: dataRows, formatRows: formatRows};});
+    }
+
+    function startTBSpreadsheetHelper(){
         start_try_times += 1;
         var $scalars_dashboard = $("tf-scalar-dashboard#dashboard").eq(0);
         if ($scalars_dashboard.length == 0) {
             if (start_try_times >= MAX_START_TRY) {
                 console.error("scalars dashboard not found. stopping retry.");
             } else {
-                setTimeout(StartTBSpreadsheetHelper, 1000);
+                setTimeout(startTBSpreadsheetHelper, 1000);
                 console.warn("scalars dashboard not found. retrying in 1 second...");
             }
             return;
         }
         var is_new_version = false;
         if ($("tf-multi-checkbox #runs-regex").length > 0) {
-            console.warn("Old version detected");
+            console.log("Old version detected");
             is_new_version = false;
         } else if ($("tf-multi-checkbox #names-regex").length > 0) {
-            console.warn("New version detected");
+            console.log("New version detected");
             is_new_version = true;
         } else {
-            console.warn("Unknown version");
+            console.error("Unknown version");
         }
         var $sidebar = $scalars_dashboard.find("#sidebar").eq(0);
         var $runs_selector = $sidebar.find("tf-runs-selector").eq(0);
@@ -65,15 +234,28 @@
         $logout_button.on("click", function() {
             window.gapi.auth2.getAuthInstance().signOut();
         });
-        // CUSTOMIZE HERE IF YOU WANT TO CHANGE SHEET FORM
-        var $exp_tip = $(
-            `<div class="exp-tip">
-<div id="exp_name"><span class="exp-title">Name:</span><span class="exp-content">jsdfklsjfs</span></div>
-<div id="exp_time"><span class="exp-title">Time:</span><span class="exp-content">salkjdklglasfj</span></div>
-<div id="exp_epoch"><span class="exp-title">Epoch:</span><span class="exp-content">saljkfaksgsk</span></div>
-<div id="exp_store"><span class="exp-title">Store:</span><span class="exp-content">saljkfaksgsk</span></div>
-<div id="exp_desc"><span class="exp-title">Description:</span><span class="exp-content">skjdfsaklgkadhgskfj sjf salkf sklfj aslkfjsalkfjskld fsdlkjfaklsfj sl fkjsfkl sjf</span></div>
-</div>`);
+        var $setup_button = $("<button style='display: none; float: right;'>Setup</button>").insertAfter($logout_button);
+        $setup_button.on("click", function() {
+            client_id = window.prompt("CLIENT_ID");
+            spreadsheet_id = window.prompt("SPREADSHEET_ID");
+            if (client_id && spreadsheet_id) {
+                GM_setValue("CLIENT_ID", client_id);
+                GM_setValue("SPREADSHEET_ID", spreadsheet_id);
+                $setup_button.hide();
+                initClient(updateSigninStatus);
+            }
+        });
+        var $sheet_set_button = $("<button style='display: none; float: right;'>Sheets</button>").insertAfter($setup_button);
+        $sheet_set_button.on("click", function() {
+            var prompt_result = window.prompt("SHEETS", avail_sheets.join(", "));
+            if (prompt_result == null) return;
+            var new_avail_sheets = prompt_result.split(",").map((sheet_name) => sheet_name.trim());
+            if (JSON.stringify(new_avail_sheets) != JSON.stringify(avail_sheets)) {
+                GM_setValue("SHEETS", new_avail_sheets);
+                avail_sheets = new_avail_sheets;
+                setUpdateSchedule(true);
+            }
+        })
         GM_addStyle(`
 .exp-tip {
     width: 500px;
@@ -87,200 +269,113 @@
     padding: 5px;
     color: white;
     font-size: 15px;
-    display: none;
+    display: table;
     animation-duration: 1s;
 }
 
-.exp-tip span {
-
-}
-
 .exp-tip>div {
-    margin-bottom: 3px;
-}
-
-.exp-tip>div:last-child {
-    margin-bottom: 0;
+    display: table-row;
 }
 
 .exp-tip span.exp-title {
-    width: 90px;
+    width: auto;
     text-align: right;
     padding-right: 10px;
-    display: inline-block;
+    display: table-cell;
     overflow: hidden;
     text-overflow: ellipsis;
     color: #bbbbbb;
     vertical-align: top;
+    white-space: nowrap;
 }
 
 .exp-tip span.exp-content {
-    width: 400px;
-    display: inline-block;
+    width: 100%;
+    display: table-cell;
     overflow: hidden;
+    white-space: pre-wrap;
+    padding-bottom: 3px;
 }
 
-.exp-tip #exp_desc span.exp-content {
-    white-space: pre-wrap;
+.exp-tip > div:last-child > span.exp-content {
+    padding-bottom: 0;
 }
 `);
+        var $exp_tip = $('<div class="exp-tip"></div>').hide();
         $("body").append($exp_tip);
         unsafeWindow.gapi = window.gapi;
-        window.dataRows = null;
-        window.formatRows = null;
-        window.timeoutId = null;
+        var dataRows = null;
+        var formatRows = null;
+        var fieldNames = null;
+        var timeoutId = null;
 
-        window.gapi.load('client:auth2', initClient);
-
-        function initClient() {
-            window.gapi.client.init({
-                apiKey: API_KEY,
-                clientId: CLIENT_ID,
-                discoveryDocs: DISCOVERY_DOCS,
-                scope: SCOPES
-            }).then(function () {
-                // Listen for sign-in state changes.
-                window.gapi.auth2.getAuthInstance().isSignedIn.listen(updateSigninStatus);
-
-                // Handle the initial sign-in state.
-                updateSigninStatus(window.gapi.auth2.getAuthInstance().isSignedIn.get());
-            }, function(response) {
-                console.error("Error init gapi: " + response.result.error.message);
-            });
+        if (client_id && spreadsheet_id) {
+            $setup_button.hide();
+            initClient(updateSigninStatus);
+        } else {
+            $setup_button.show();
         }
 
-        function protoToCssColor(rgb_color) {
-            var redFrac = rgb_color.red || 0.0;
-            var greenFrac = rgb_color.green || 0.0;
-            var blueFrac = rgb_color.blue || 0.0;
-            var red = Math.floor(redFrac * 255);
-            var green = Math.floor(greenFrac * 255);
-            var blue = Math.floor(blueFrac * 255);
-            return rgbToCssColor(red, green, blue);
-        };
-
-        function rgbToCssColor(red, green, blue) {
-            var rgbNumber = new Number((red << 16) | (green << 8) | blue);
-            var hexString = rgbNumber.toString(16);
-            var missingZeros = 6 - hexString.length;
-            var resultBuilder = ['#'];
-            for (var i = 0; i < missingZeros; i++) {
-                resultBuilder.push('0');
+        function clearUpdateSchedule() {
+            if (timeoutId !== null) {
+                window.clearTimeout(timeoutId);
+                timeoutId = null;
             }
-            resultBuilder.push(hexString);
-            return resultBuilder.join('');
-        };
+        }
 
-        function RefreshData() {
-            if (window.timeoutId !== null) {
-                window.clearTimeout(window.timeoutId);
-                window.timeoutId = null;
+        function setUpdateSchedule(immediate) {
+            function update() {
+                clearUpdateSchedule();
+                loadAllData().then((value) => {
+                    dataRows = value.dataRows;
+                    formatRows = value.formatRows;
+                    updateElements();
+                    setUpdateSchedule(false);});
             }
-            var now = new Date();
-            console.log("[" + now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds() + "." + now.getMilliseconds() + "] " +
-                        "Loading spreadsheet data");
-            window.gapi.client.sheets.spreadsheets.values.batchGet({
-                spreadsheetId: SPREADSHEET_ID,
-                majorDimension: "ROWS",
-                ranges: SHEET
-            }).then(function(response) {
-                // loading data
-                var ranges = response.result.valueRanges;
-                var exp_runs = {};
-                if (ranges.length > 0 && ranges[0].values.length > 0) {
-                    var range = ranges[0];
-                    for (var i = 1; i < range.values.length; i++) {
-                        var row = range.values[i];
-                        var exp_name = row[COL_NAME].trim();
-                        if (exp_name.length > 0) {
-                            exp_runs[exp_name] = row;
-                        }
-                    }
-                    window.dataRows = exp_runs;
-                } else {
-                    console.error("No data found.");
-                    window.dataRows = null;
-                }
-                // go loading format
-                return window.gapi.client.sheets.spreadsheets.get({
-                    spreadsheetId: SPREADSHEET_ID,
-                    ranges: SHEET + "!" + COL_NAME_L + ":" + COL_NAME_L,
-                    includeGridData: true
-                });
-            }, function(response) {
-                console.error("Error loading data: " + response.result.error.message);
-                window.dataRows = null;
-                RefreshInfo();
-                window.timeoutId = window.setTimeout(RefreshData, REFRESH_RATE * 1000);
-            }).then(function(response) {
-                // loading format
-                var data = response.result.sheets[0].data;
-                if (data.length > 0) {
-                    var formats = {};
-                    var range = data[0].rowData;
-                    for (var i = 1; i < range.length; i++) {
-                        var cell = range[i].values[0];
-                        if (typeof cell.formattedValue == "undefined") continue;
-                        var cell_name = cell.formattedValue.trim();
-                        if (typeof window.dataRows[cell_name] != "undefined") {
-                            var forcolor = protoToCssColor(cell.effectiveFormat.textFormat.foregroundColor);
-                            if (forcolor != "#000000")
-                            {
-                                formats[cell_name] = forcolor;
-                            }
-                        }
-                    }
-                    window.formatRows = formats;
-                } else {
-                    console.error("No data found.");
-                    window.formatRows = null;
-                }
-                RefreshInfo();
-                window.timeoutId = window.setTimeout(RefreshData, REFRESH_RATE * 1000);
-            }, function(response) {
-                console.error("Error loading format: " + response.result.error.message);
-                window.formatRows = null;
-                RefreshInfo();
-                window.timeoutId = window.setTimeout(RefreshData, REFRESH_RATE * 1000);
-            });
+            if (immediate) update();
+            else timeoutId = window.setTimeout(update, REFRESH_RATE * 1000);
         }
 
         function updateSigninStatus(isSignedIn) {
             if (isSignedIn) {
                 $login_button.css("display", "none");
                 $logout_button.css("display", "block");
-                RefreshData();
-                $multi_checkbox.on("dom-change", RefreshInfo);
+                $sheet_set_button.css("display", "block");
+                loadAllFieldNames().then((fnames) => {
+                    fieldNames = fnames;
+                    setUpdateSchedule(true);
+                });
+                $multi_checkbox.on("dom-change", updateElements);
             } else {
                 $login_button.css("display", "block");
                 $logout_button.css("display", "none");
-                if (window.timeoutId !== null) {
-                    window.clearTimeout(window.timeoutId);
-                    window.timeoutId = null;
-                }
-                $multi_checkbox.off("dom-change", RefreshInfo);
+                $sheet_set_button.css("display", "none");
+                clearUpdateSchedule();
+                $multi_checkbox.off("dom-change", updateElements);
             }
         }
 
         function showTip(run) {
-            var exp_name = $(run).find(".item-label-container span").eq(0).text();
-            console.log(exp_name);
-            var exp_name_comps = exp_name.split("/");
-            if (exp_name_comps.length < 2) return;
-            var exp_run = exp_name_comps[1];
-            var row = window.dataRows[exp_run];
+            var exp_run = $(run).find(".item-label-container span").eq(0).text();
+            $exp_tip.children().remove();
+            var row = dataRows[exp_run];
+            var format = formatRows[exp_run];
             if (typeof row == "undefined") return;
-            // CUSTOMIZE HERE IF YOU WANT TO CHANGE SHEET FORM
-            $exp_tip.children("#exp_name").children(".exp-content").text(exp_run);
-            $exp_tip.children("#exp_time").children(".exp-content").text(row[COL_TIME]);
-            $exp_tip.children("#exp_epoch").children(".exp-content").text(row[COL_EPOCH]);
-            $exp_tip.children("#exp_store").children(".exp-content").text(row[COL_STORE]);
-            $exp_tip.children("#exp_desc").children(".exp-content").text(row[COL_DESC]);
-            if (typeof window.formatRows[exp_run] != "undefined") {
-                $exp_tip.children("#exp_name").children(".exp-content").css("color", window.formatRows[exp_run]);
-            } else {
-                $exp_tip.children("#exp_name").children(".exp-content").css("color", "");
+            var fields = fieldNames[row.sheet];
+            if (typeof fields == "undefined") return;
+            for (var fn = 0; fn < fields.length; fn++) {
+                var $row_ele = $(`<div><span class="exp-title">${fields[fn]}:</span><span class="exp-content">${typeof row.data[fn] == "undefined" ? "" : row.data[fn]}</span></div>`).appendTo($exp_tip);
+                if (typeof format == "undefined") continue;
+                var forcolor = format[fn][0];
+                var backcolor = format[fn][1];
+                if (forcolor != null) {
+                    $row_ele.children(".exp-content").css("color", forcolor);
+                }
+                if (backcolor != null) {
+                    $row_ele.children(".exp-content").css("background-color", backcolor);
+                }
             }
+            
             $exp_tip.show();
         }
 
@@ -316,12 +411,12 @@
             }
         }
 
-        function RefreshInfo() {
+        function updateElements() {
             var $runs = $multi_checkbox.find("#outer-container div." + (!is_new_version?"run-row":"name-row"));
             var $runs_title = $runs.find(".item-label-container span");
             var exp_runs = [];
-            if (window.dataRows !== null) {
-                exp_runs = Object.getOwnPropertyNames(window.dataRows);
+            if (dataRows !== null) {
+                exp_runs = Object.getOwnPropertyNames(dataRows);
             }
             $runs.off(".showtip");
             $runs.on("mouseenter.showtip", function(e) {
@@ -334,21 +429,21 @@
                 moveTip(e.clientX, e.clientY);
             });
             $runs_title.each(function (i, e) {
-                var exp_name_comps = e.innerText.split("/");
-                var exp_run = exp_name_comps[1];
-                if (window.dataRows !== null && (exp_name_comps.length < 2 || exp_runs.indexOf(exp_run) == -1)) {
-                    $(e).css("color", "#af0404");
-                } else {
-                    if (window.formatRows !== null &&  typeof window.formatRows[exp_run] != "undefined") {
-                        $(e).css("color", window.formatRows[exp_run]);
-                    } else {
-                        $(e).css("color", "");
-                    }
+                var exp_run = e.innerText;
+                var forcolor = "", backcolor = "";
+                if (dataRows !== null && !dataRows.hasOwnProperty(exp_run)) {
+                    forcolor = "#af0404";
+                } else if (formatRows !== null && typeof formatRows[exp_run] != "undefined") {
+                    var colors = formatRows[exp_run][COL_INDEX];
+                    if (colors[0] != null) forcolor = colors[0];
+                    if (colors[1] != null) backcolor = colors[1];
                 }
+                $(e).css("color", forcolor);
+                $(e).css("background-color", backcolor);
             });
         }
     }
 
-    document.addEventListener('WebComponentsReady', StartTBSpreadsheetHelper);
+    document.addEventListener('WebComponentsReady', startTBSpreadsheetHelper);
 
 })();
