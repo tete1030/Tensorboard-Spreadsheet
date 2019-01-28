@@ -27,7 +27,7 @@
 
     var client_id = GM_getValue("CLIENT_ID", null);
     var spreadsheet_id = GM_getValue("SPREADSHEET_ID", null);
-    var avail_sheets = GM_getValue("SHEETS", []);
+    var avail_sheets = GM_getValue("SHEETS", []).filter((val) => (val != null && val.trim() != ""));
 
     Object.fromEntries = arr => 
         Object.assign({}, ...Array.from(arr, ([k, v]) => ({[k]: v}) ));
@@ -248,12 +248,14 @@
         var $sheet_set_button = $("<button style='display: none; float: right;'>Sheets</button>").insertAfter($setup_button);
         $sheet_set_button.on("click", function() {
             var prompt_result = window.prompt("SHEETS", avail_sheets.join(", "));
-            if (prompt_result == null) return;
-            var new_avail_sheets = prompt_result.split(",").map((sheet_name) => sheet_name.trim());
-            if (JSON.stringify(new_avail_sheets) != JSON.stringify(avail_sheets)) {
+            if (prompt_result === null) return;
+            var new_avail_sheets = [];
+            if (prompt_result.trim() != "") 
+                new_avail_sheets = prompt_result.trim().split(",").map((sheet_name) => sheet_name.trim());
+            if (JSON.stringify(new_avail_sheets) != JSON.stringify(avail_sheets) || new_avail_sheets == []) {
                 GM_setValue("SHEETS", new_avail_sheets);
                 avail_sheets = new_avail_sheets;
-                setUpdateSchedule(true);
+                startLoading();
             }
         })
         GM_addStyle(`
@@ -336,15 +338,20 @@
             else timeoutId = window.setTimeout(update, REFRESH_RATE * 1000);
         }
 
+        function startLoading() {
+            clearUpdateSchedule();
+            loadAllFieldNames().then((fnames) => {
+                fieldNames = fnames;
+                setUpdateSchedule(true);
+            });
+        }
+
         function updateSigninStatus(isSignedIn) {
             if (isSignedIn) {
                 $login_button.css("display", "none");
                 $logout_button.css("display", "block");
                 $sheet_set_button.css("display", "block");
-                loadAllFieldNames().then((fnames) => {
-                    fieldNames = fnames;
-                    setUpdateSchedule(true);
-                });
+                startLoading();
                 $multi_checkbox.on("dom-change", updateElements);
             } else {
                 $login_button.css("display", "block");
