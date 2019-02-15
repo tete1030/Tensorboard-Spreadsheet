@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Tensorboard Spreadsheet Helper
 // @namespace    http://texot.one/
-// @version      0.3
+// @version      0.4
 // @require      https://code.jquery.com/jquery-latest.js
+// @require      https://code.jquery.com/ui/1.12.1/jquery-ui.min.js
 // @require      https://apis.google.com/js/api.js
 // @author       Texot
-// @match        http://localhost:8889/*
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -15,11 +15,15 @@
 (function() {
     'use strict';
 
+    const STORAGE_SIDEBAR_MAX_WIDTH = "texot.tfrunhelper.sbmaxwid";
+    const STORAGE_SIDEBAR_MIN_WIDTH = "texot.tfrunhelper.sbminwid";
+    const STORAGE_SIDEBAR_WIDTH = "texot.tfrunhelper.sbwid";
+    const STORAGE_OPTIONS_VIS = "texot.tfrunhelper.options_vis";
     const DISCOVERY_DOCS = ["https://sheets.googleapis.com/$discovery/rest?version=v4"];
     const SCOPES = "https://www.googleapis.com/auth/spreadsheets.readonly";
 
     const REFRESH_RATE = 30;
-    
+
     const COL_INDEX = 0;
 
     const MAX_START_TRY = 3;
@@ -29,7 +33,7 @@
     var spreadsheet_id = GM_getValue("SPREADSHEET_ID", null);
     var avail_sheets = GM_getValue("SHEETS", []).filter((val) => (val != null && val.trim() != ""));
 
-    Object.fromEntries = arr => 
+    Object.fromEntries = arr =>
         Object.assign({}, ...Array.from(arr, ([k, v]) => ({[k]: v}) ));
 
     function getColumnLetter(column) {
@@ -81,7 +85,10 @@
                 // Handle the initial sign-in state.
                 updateCallback(window.gapi.auth2.getAuthInstance().isSignedIn.get());
             }, function(response) {
-                console.error("Error init gapi: " + response.result.error.message);
+                if (response != null)
+                    console.error("Error init gapi: " + response);
+                else
+                    console.error("Error init gapi: null response");
             });
         });
     }
@@ -113,13 +120,13 @@
                 var exp_runs = {};
                 for (var i = 1; i < range_data.values.length; i++) {
                     var row = range_data.values[i];
-                    var exp_index = row[COL_INDEX].trim();
-                    if (exp_index.length > 0) {
+                    var exp_index = row[COL_INDEX] == null ? null : row[COL_INDEX].trim();
+                    if (exp_index != null && exp_index.length > 0) {
                         exp_runs[exp_index] = {sheet: sheet_name, data: row};
                     }
                 }
                 dataRows = exp_runs;
-                
+
                 // go loading format
                 return window.gapi.client.sheets.spreadsheets.get({
                     spreadsheetId: spreadsheet_id,
@@ -129,7 +136,9 @@
             })
             .catch(function(response) {
                 if (response != null)
-                    console.error("Error loading data: " + response.result.error.message);
+                    console.error("Error loading data: " + response);
+                else
+                    console.error("Error loading data: null response");
                 dataRows = null;
                 return Promise.reject(null);
             })
@@ -167,7 +176,9 @@
             })
             .catch(function(response) {
                 if (response != null)
-                    console.error("Error loading format: " + response.result.error.message);
+                    console.error("Error loading format: " + response);
+                else
+                    console.error("Error loading format: null response");
                 formatRows = null;
             })
             .then(function () {
@@ -200,64 +211,6 @@
     }
 
     function startTBSpreadsheetHelper(){
-        start_try_times += 1;
-        var $scalars_dashboard = $("tf-scalar-dashboard#dashboard").eq(0);
-        if ($scalars_dashboard.length == 0) {
-            if (start_try_times >= MAX_START_TRY) {
-                console.error("scalars dashboard not found. stopping retry.");
-            } else {
-                setTimeout(startTBSpreadsheetHelper, 1000);
-                console.warn("scalars dashboard not found. retrying in 1 second...");
-            }
-            return;
-        }
-        var is_new_version = false;
-        if ($("tf-multi-checkbox #runs-regex").length > 0) {
-            console.log("Old version detected");
-            is_new_version = false;
-        } else if ($("tf-multi-checkbox #names-regex").length > 0) {
-            console.log("New version detected");
-            is_new_version = true;
-        } else {
-            console.error("Unknown version");
-        }
-        var $sidebar = $scalars_dashboard.find("#sidebar").eq(0);
-        var $runs_selector = $sidebar.find("tf-runs-selector").eq(0);
-        var $multi_checkbox = $runs_selector.find("#multiCheckbox").eq(0);
-        var $runs_title = $runs_selector.find("#top-text h3");
-        $runs_title.css("display", "inline");
-        var $login_button = $("<button style='display: none; float: right;'>Login</button>").insertAfter($runs_title);
-        $login_button.on("click", function() {
-            window.gapi.auth2.getAuthInstance().signIn();
-        });
-        var $logout_button = $("<button style='display: none; float: right;'>Logout</button>").insertAfter($login_button);
-        $logout_button.on("click", function() {
-            window.gapi.auth2.getAuthInstance().signOut();
-        });
-        var $setup_button = $("<button style='display: none; float: right;'>Setup</button>").insertAfter($logout_button);
-        $setup_button.on("click", function() {
-            client_id = window.prompt("CLIENT_ID");
-            spreadsheet_id = window.prompt("SPREADSHEET_ID");
-            if (client_id && spreadsheet_id) {
-                GM_setValue("CLIENT_ID", client_id);
-                GM_setValue("SPREADSHEET_ID", spreadsheet_id);
-                $setup_button.hide();
-                initClient(updateSigninStatus);
-            }
-        });
-        var $sheet_set_button = $("<button style='display: none; float: right;'>Sheets</button>").insertAfter($setup_button);
-        $sheet_set_button.on("click", function() {
-            var prompt_result = window.prompt("SHEETS", avail_sheets.join(", "));
-            if (prompt_result === null) return;
-            var new_avail_sheets = [];
-            if (prompt_result.trim() != "") 
-                new_avail_sheets = prompt_result.trim().split(",").map((sheet_name) => sheet_name.trim());
-            if (JSON.stringify(new_avail_sheets) != JSON.stringify(avail_sheets) || new_avail_sheets == []) {
-                GM_setValue("SHEETS", new_avail_sheets);
-                avail_sheets = new_avail_sheets;
-                startLoading();
-            }
-        })
         GM_addStyle(`
 .exp-tip {
     width: 500px;
@@ -310,13 +263,7 @@
         var formatRows = null;
         var fieldNames = null;
         var timeoutId = null;
-
-        if (client_id && spreadsheet_id) {
-            $setup_button.hide();
-            initClient(updateSigninStatus);
-        } else {
-            $setup_button.show();
-        }
+        var elements = null;
 
         function clearUpdateSchedule() {
             if (timeoutId !== null) {
@@ -348,17 +295,17 @@
 
         function updateSigninStatus(isSignedIn) {
             if (isSignedIn) {
-                $login_button.css("display", "none");
-                $logout_button.css("display", "block");
-                $sheet_set_button.css("display", "block");
+                elements.$login_button.css("display", "none");
+                elements.$logout_button.css("display", "block");
+                elements.$sheet_set_button.css("display", "block");
                 startLoading();
-                $multi_checkbox.on("dom-change", updateElements);
+                elements.$multi_checkbox.on("dom-change", updateElements);
             } else {
-                $login_button.css("display", "block");
-                $logout_button.css("display", "none");
-                $sheet_set_button.css("display", "none");
+                elements.$login_button.css("display", "block");
+                elements.$logout_button.css("display", "none");
+                elements.$sheet_set_button.css("display", "none");
                 clearUpdateSchedule();
-                $multi_checkbox.off("dom-change", updateElements);
+                elements.$multi_checkbox.off("dom-change", updateElements);
             }
         }
 
@@ -382,7 +329,7 @@
                     $row_ele.children(".exp-content").css("background-color", backcolor);
                 }
             }
-            
+
             $exp_tip.show();
         }
 
@@ -398,10 +345,10 @@
                 tip_loc = "side";
 
                 if ($exp_tip.css("display") === "none") {
-                    $exp_tip.css("left", ($sidebar.width() + 10) + "px");
+                    $exp_tip.css("left", (elements.$sidebar.width() + 10) + "px");
                 } else {
                     $exp_tip.animate({
-                        left: ($sidebar.width() + 10) + "px"
+                        left: (elements.$sidebar.width() + 10) + "px"
                     }, 200);
                 }
             } else {
@@ -419,7 +366,7 @@
         }
 
         function updateElements() {
-            var $runs = $multi_checkbox.find("#outer-container div." + (!is_new_version?"run-row":"name-row"));
+            var $runs = elements.$multi_checkbox.find("#outer-container div." + (!elements.is_new_version?"run-row":"name-row"));
             var $runs_title = $runs.find(".item-label-container span");
             var exp_runs = [];
             if (dataRows !== null) {
@@ -449,6 +396,190 @@
                 $(e).css("background-color", backcolor);
             });
         }
+
+        function setupSiderbarController($dashboard) {
+            let $sections_container = $dashboard.find("#sidebar").eq(0);
+            $sections_container.css("position", "relative");
+
+            // Make siderbar resizable
+            $('<link rel="stylesheet" type="text/css" href="http://code.jquery.com/ui/1.9.2/themes/base/jquery-ui.css"/>').appendTo(document.head);
+            $sections_container
+                .css("max-width", tf_storage.getString(STORAGE_SIDEBAR_MAX_WIDTH) || "")
+                .css("min-width", tf_storage.getString(STORAGE_SIDEBAR_MIN_WIDTH) || "")
+                .css("width", tf_storage.getString(STORAGE_SIDEBAR_WIDTH) || "")
+                .resizable({
+                handles: "w,e",
+                resize: function (event, ui) {
+                    if (ui.size.width >= 20) {
+                        ui.element.css("max-width", "unset");
+                        ui.element.css("min-width", "unset");
+                        if (is_new_version) {
+                            ui.element.css("flex-basis", ui.size.width + "px");
+                        }
+                    }
+                },
+                stop: function (event, ui) {
+                    if (ui.size.width >= 20) {
+                        tf_storage.setString(STORAGE_SIDEBAR_MAX_WIDTH, "unset");
+                        tf_storage.setString(STORAGE_SIDEBAR_MIN_WIDTH, "unset");
+                        tf_storage.setString(STORAGE_SIDEBAR_WIDTH, ui.size.width);
+                    } else {
+                        ui.element.css("max-width", "");
+                        ui.element.css("min-width", "");
+                        ui.element.css("width", "");
+                        if (is_new_version) {
+                            ui.element.css("flex-basis", "");
+                        }
+                        tf_storage.setString(STORAGE_SIDEBAR_MAX_WIDTH, "");
+                        tf_storage.setString(STORAGE_SIDEBAR_MIN_WIDTH, "");
+                        tf_storage.setString(STORAGE_SIDEBAR_WIDTH, "");
+                    }
+                }
+            });
+
+            // Add button to control options visiblity
+            const STRING_SHOW_OPTIONS = "Show Options";
+            const STRING_HIDE_OPTIONS = "Hide Options";
+            function setOptionsVis(btn, vis) {
+                if (vis) {
+                    $dashboard.find("#sidebar .sidebar-section").slice(0, 3).show();
+                    btn.innerText = STRING_HIDE_OPTIONS;
+                    tf_storage.setBoolean(STORAGE_OPTIONS_VIS, true);
+                } else {
+                    $dashboard.find("#sidebar .sidebar-section").slice(0, 3).hide();
+                    btn.innerText = STRING_SHOW_OPTIONS;
+                    tf_storage.setBoolean(STORAGE_OPTIONS_VIS, false);
+                }
+            }
+
+            let $btn_vis = $("<button style='display: block; float: right; position: absolute; bottom: 10px; right: 10px;'></button>").appendTo($sections_container)
+                .on("click", function(e) {
+                if (this.innerText == STRING_HIDE_OPTIONS) {
+                    setOptionsVis(this, false);
+                } else {
+                    setOptionsVis(this, true);
+                }
+            });
+            var vis = tf_storage.getBoolean(STORAGE_OPTIONS_VIS);
+            if (typeof vis == "undefined") vis = true;
+            setOptionsVis($btn_vis[0], vis);
+        }
+
+        function setupPlugin(plugin_name) {
+            var $scalars_dashboard = $(".dashboard-container[data-dashboard='" + plugin_name + "']").eq(0).children().eq(0);
+            if ($scalars_dashboard.length == 0) return null;
+            var is_new_version = false;
+            if ($("tf-multi-checkbox #runs-regex").length > 0) {
+                console.log("Old version detected");
+                is_new_version = false;
+            } else if ($("tf-multi-checkbox #names-regex").length > 0) {
+                console.log("New version detected");
+                is_new_version = true;
+            } else {
+                console.error("Unknown version");
+            }
+
+            if (typeof unsafeWindow.tf_storage == "undefined" && typeof unsafeWindow.W != "undefined" && typeof unsafeWindow.W.addStorageListener != "undefined") {
+                console.log("Tensorboard 1.12.0");
+                unsafeWindow.tf_storage = unsafeWindow.W;
+            }
+
+            var $sidebar = $scalars_dashboard.find("#sidebar").eq(0);
+            var $runs_selector = $sidebar.find("tf-runs-selector").eq(0);
+            var $multi_checkbox = $runs_selector.find("#multiCheckbox").eq(0);
+            var $runs_title = $runs_selector.find("#top-text h3");
+            $runs_title.css("display", "inline");
+
+            var $login_button, $logout_button, $setup_button, $sheet_set_button;
+            if ($scalars_dashboard.find("#login_button").length == 0) {
+                setupSiderbarController($scalars_dashboard);
+                $login_button = $("<button id='login_button' style='display: none; float: right;'>Login</button>").insertAfter($runs_title);
+                $login_button.on("click", function() {
+                    window.gapi.auth2.getAuthInstance().signIn();
+                });
+                $logout_button = $("<button id='logout_button' style='display: none; float: right;'>Logout</button>").insertAfter($login_button);
+                $logout_button.on("click", function() {
+                    window.gapi.auth2.getAuthInstance().signOut();
+                });
+                $setup_button = $("<button id='setup_button' style='display: none; float: right;'>Setup</button>").insertAfter($logout_button);
+                $setup_button.on("click", function() {
+                    client_id = window.prompt("CLIENT_ID");
+                    spreadsheet_id = window.prompt("SPREADSHEET_ID");
+                    if (client_id && spreadsheet_id) {
+                        GM_setValue("CLIENT_ID", client_id);
+                        GM_setValue("SPREADSHEET_ID", spreadsheet_id);
+                        $setup_button.hide();
+                        initClient(updateSigninStatus);
+                    }
+                });
+                $sheet_set_button = $("<button id='sheet_set_button' style='display: none; float: right;'>Sheets</button>").insertAfter($setup_button);
+                $sheet_set_button.on("click", function() {
+                    var prompt_result = window.prompt("SHEETS", avail_sheets.join(", "));
+                    if (prompt_result === null) return;
+                    var new_avail_sheets = [];
+                    if (prompt_result.trim() != "")
+                        new_avail_sheets = prompt_result.trim().split(",").map((sheet_name) => sheet_name.trim());
+                    if (JSON.stringify(new_avail_sheets) != JSON.stringify(avail_sheets) || new_avail_sheets == []) {
+                        GM_setValue("SHEETS", new_avail_sheets);
+                        avail_sheets = new_avail_sheets;
+                        startLoading();
+                    }
+                })
+            } else {
+                $login_button = $scalars_dashboard.find("#login_button").eq(0);
+                $logout_button = $scalars_dashboard.find("#logout_button").eq(0);
+                $setup_button = $scalars_dashboard.find("#setup_button").eq(0);
+                $sheet_set_button = $scalars_dashboard.find("#sheet_set_button").eq(0);
+            }
+
+            if (client_id && spreadsheet_id) {
+                $setup_button.hide();
+            } else {
+                $setup_button.show();
+            }
+            return {
+                plugin_name: plugin_name,
+                $dashboard: $scalars_dashboard,
+                is_new_version: is_new_version,
+                $sidebar: $sidebar,
+                $runs_selector: $runs_selector,
+                $multi_checkbox: $multi_checkbox,
+                $runs_title: $runs_title,
+                $login_button: $login_button,
+                $logout_button: $logout_button,
+                $setup_button: $setup_button,
+                $sheet_set_button: $sheet_set_button
+            }
+        }
+
+        start_try_times += 1;
+        var tabs_ele = $("paper-tabs")[0];
+        if (typeof tabs_ele != "undefined")
+            elements = setupPlugin(tabs_ele.selected)
+
+        $(tabs_ele).on("click", function(event) {
+            window.setTimeout(function() {
+                if (elements.plugin_name != tabs_ele.selected) {
+                    elements = setupPlugin(tabs_ele.selected);
+                    updateElements();
+                }
+            }, 500);
+        })
+
+        if (elements == null) {
+            if (start_try_times >= MAX_START_TRY) {
+                console.error("scalars dashboard not found. stopping retry.");
+            } else {
+                setTimeout(startTBSpreadsheetHelper, 1000);
+                console.warn("scalars dashboard not found. retrying in 1 second...");
+            }
+            return;
+        }
+
+        if (client_id && spreadsheet_id) {
+            initClient(updateSigninStatus);
+        }
+
     }
 
     document.addEventListener('WebComponentsReady', startTBSpreadsheetHelper);
